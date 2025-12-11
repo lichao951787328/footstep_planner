@@ -34,7 +34,20 @@ add_executable(footstep_planner # 添加一个可执行文件
     src/footstep_planner_casadi.cpp
 )
 
+add_executable(footstep_planner_double_layer # 添加一个可执行文件
+    src/footstep_planner_double_layer.cpp
+)
+
 target_link_libraries(footstep_planner # 链接库
+    Eigen3::Eigen 
+    ${PYTHON_LIBRARIES}
+    ${matplotlib_cpp_library} # 这里有拼写错误
+    casadi
+    glog::glog
+    # OsqpEigen::OsqpEigen
+)
+
+target_link_libraries(footstep_planner_double_layer # 链接库
     Eigen3::Eigen 
     ${PYTHON_LIBRARIES}
     ${matplotlib_cpp_library} # 这里有拼写错误
