@@ -19,7 +19,7 @@
 using namespace std;
 namespace plt = matplotlibcpp;
 // ==========================================
-// 辅助函数区域 (保持不变，仅修正 polynomial 类型支持)
+// 辅助函数区域 (保持不变，仅修正 polynomial 类型支持)。动力学模型部分见2023,2022年，alip_feetstep_planning的论文，其他部分见2014年的论文。
 // ==========================================
 
 // 允许传入 CasADi MX 或 double 的多项式函数
@@ -34,6 +34,8 @@ T polynomial_func(const Eigen::Vector<double, 6>& param, T x) {
 // 特化：针对 CasADi MX 的 pow
 casadi::MX pow(casadi::MX x, int n) { return casadi::MX::pow(x, n); }
 
+
+// 机器人动力学的矩阵计算函数（基础矩阵）
 Eigen::Matrix4d get_autonomous_alip_matrix_A(double H_com, double mass, double g) {
     Eigen::Matrix4d A_c_autonomous;
     A_c_autonomous << 0, 0, 0, 1 / (mass * H_com),
@@ -43,6 +45,7 @@ Eigen::Matrix4d get_autonomous_alip_matrix_A(double H_com, double mass, double g
     return A_c_autonomous;
 }
 
+// 单脚支撑期状态转移函数矩阵（含输入矩阵）
 std::pair<Eigen::Matrix4d, Eigen::Matrix<double, 4, 2>> get_alip_matrices_with_input(double H_com, double mass, double g, double T_ss_dt) {
     Eigen::Matrix4d A_c = get_autonomous_alip_matrix_A(H_com, mass, g);
     Eigen::Matrix<double, 4, 2> B_c;
@@ -60,6 +63,7 @@ std::pair<Eigen::Matrix4d, Eigen::Matrix<double, 4, 2>> get_alip_matrices_with_i
     return {A_d, B_d};
 }
 
+// 双脚支撑期状态转移矩阵及 Reset Map 矩阵（含位置变换）
 std::pair<Eigen::Matrix4d, Eigen::Matrix<double, 4, 3>> get_alip_reset_map_matrices_detailed(double T_ds, double H_com, double mass, double g) {
     Eigen::Matrix4d A_c = get_autonomous_alip_matrix_A(H_com, mass, g);
     Eigen::Matrix4d Ar_ds = (A_c * T_ds).exp();
@@ -100,16 +104,20 @@ int main(int argc, char** argv)
     Eigen::Vector<double, 6> polynomial_param;
     polynomial_param << 0, 0, -0.015625, 0.09375, 0, 0;
 
+    // 设定起点和终点
     double x_goal = 4.0;
     double y_goal = polynomial_func(polynomial_param, x_goal);
     LOG(INFO)<< "Goal position: (" << x_goal << ", " << y_goal << ")";
     double delta_x = 0.01;
     double delta_y = polynomial_func(polynomial_param, x_goal + delta_x) - polynomial_func(polynomial_param, x_goal);
-    // double yaw_goal = atan2(delta_y, delta_x);
-    double yaw_goal = -45 / 180.0 * M_PI; // 目标朝向设为-30度
+    double yaw_goal = atan2(delta_y, delta_x);
+    // double yaw_goal = 45 / 180.0 * M_PI; // 目标朝向设为-30度
+
+    // 定义目标质心状态
     Eigen::Vector4d x_com_goal(x_goal, y_goal, 0, 0);
 
     // 2. 机器人参数与矩阵初始化，根据左右脚来决定的初始支撑脚
+    // 假设机器人初始时刻左脚支撑，并据此确定机器人的左脚位置。初始时刻，机器人base在地面上的投影点为坐标远点，往前x,往左y,向上z。
     bool initial_left_support = true;
     Eigen::Vector3d p_start_support_foot;
     if (initial_left_support)
@@ -121,14 +129,16 @@ int main(int argc, char** argv)
         p_start_support_foot = Eigen::Vector3d(0.0, -0.1, 0.0); // 初始右脚支撑
     }
 
-    // to do list 可以换成以0.3进行步长的距离和转角来决定步数
+    // 估计到达终点的距离与步数
     LOG(INFO) << "line distance: " << std::sqrt(std::pow(x_goal - p_start_support_foot(0), 2) + std::pow(y_goal - p_start_support_foot(1), 2));
     // props.total_time 保持不变 (由 N 决定)
     
-
+    // 这个还需要改进，考虑路径曲率
     size_t steps_1 = std::ceil((std::sqrt(std::pow(x_goal - p_start_support_foot(0), 2) + std::pow(y_goal - p_start_support_foot(1), 2))) / (0.3)) + 2; 
     // size_t steps_1 = std::ceil(props.total_dist / (0.3)) + 2; 
     LOG(INFO)<< "Determined number of steps based on distance: " << steps_1;
+
+    // 估计到达终点的转角变化量与步数
     double start_x = 0.0; // 修正: 假设从 0 开始
     double total_yaw_change = 0.0;
     double sample_step = 0.1;
@@ -145,7 +155,7 @@ int main(int argc, char** argv)
         prev_yaw = current_yaw;
     }
 
-    size_t steps_2 = std::ceil(total_yaw_change / (M_PI / 12)); 
+    size_t steps_2 = std::ceil(total_yaw_change / (M_PI / 12)) + 2; 
     LOG(INFO)<< "Determined number of steps based on yaw change: " << steps_2;
     size_t N = std::max(steps_1, steps_2) ;
     LOG(INFO)<< "Determined number of steps N: " << N;
@@ -160,7 +170,7 @@ int main(int argc, char** argv)
     casadi::Opti opti = casadi::Opti();
 
     // --- 变量定义 (顺序不变) ---
-
+    // 定义优化变量，即落脚点，每个落脚点包含 (x, y, yaw)。暂时不考虑 z 高度变化。
     casadi::MX P = opti.variable(3, N); 
 
     // --- 代价函数 (顺序不变) ---
@@ -182,7 +192,7 @@ int main(int argc, char** argv)
         J += lambda_step_smooth * ((P_next(0) - P_current(0)) * (P_next(0) - P_current(0)) + (P_next(1) - P_current(1)) * (P_next(1) - P_current(1)));
     }
 
-    // 转向角跟随 Cost
+    // 转向角跟随局部path Cost
     double lambda_yaw_guide = 5.0; // 权重给大一点
     for (size_t i = 0; i < N; ++i) {
         casadi::MX cx = P(0, i);
@@ -210,7 +220,7 @@ int main(int argc, char** argv)
         // J += lambda_crab_avoid * (1.0 - casadi::MX::cos(step_yaw - P(2, current_foot_index)));
     }
 
-    // 路径跟踪 Cost
+    // 路径跟踪 Cost。规划的落脚点要跟踪多项式path
     double lambda_path_tracking = 2.0; // 权重
     for (size_t i = 1; i < N; ++i) {
         casadi::MX mid_x = (P(0, i - 1) + P(0, i)) / 2.0;
@@ -445,6 +455,7 @@ int main(int argc, char** argv)
 
     casadi::MX J_alip = 0;
 
+    // 转角均匀 Cost
     double lambda_yaw_smooth_alip = 300.0;
     for (size_t i = 0; i < N - 1; ++i) {
         J_alip += lambda_yaw_smooth_alip * (P_alip(2, i + 1) - P_alip(2, i)) * (P_alip(2, i + 1) - P_alip(2, i));
@@ -475,42 +486,40 @@ int main(int argc, char** argv)
     // }
 
     // 避免出现螃蟹步
-    // double lambda_crab_avoid = 80.0;
-    // for (size_t i = 0; i < N - 2; ++i) {
-    //     // 首先确定当前是左脚还是右脚，再选择后一次对应的左右脚，再计算两个落脚点的方向，该方向与当前朝向的夹角
-    //     casadi::MX delta_x = P_alip(0, i + 2) - P_alip(0, i);
-    //     casadi::MX delta_y = P_alip(1, i + 2) - P_alip(1, i);
-    //     casadi::MX yaw = P_alip(2, i);
-    //     // 当前是左脚落脚点，下一次也是左脚落脚点
-    //     casadi::MX lateral_disp = -casadi::MX::sin(yaw) * delta_x + casadi::MX::cos(yaw) * delta_y;
-    //     J_alip += lambda_crab_avoid * (lateral_disp * lateral_disp);
-    //     // J += lambda_crab_avoid * (1.0 - casadi::MX::cos(step_yaw - P(2, current_foot_index)));
-    // }
+    double lambda_crab_avoid_alip = 80.0;
+    for (size_t i = 0; i < N - 2; ++i) {
+        // 首先确定当前是左脚还是右脚，再选择后一次对应的左右脚，再计算两个落脚点的方向，该方向与当前朝向的夹角
+        casadi::MX delta_x = P_alip(0, i + 2) - P_alip(0, i);
+        casadi::MX delta_y = P_alip(1, i + 2) - P_alip(1, i);
+        casadi::MX yaw = P_alip(2, i);
+        // 当前是左脚落脚点，下一次也是左脚落脚点
+        casadi::MX lateral_disp = -casadi::MX::sin(yaw) * delta_x + casadi::MX::cos(yaw) * delta_y;
+        J_alip += lambda_crab_avoid_alip * (lateral_disp * lateral_disp);
+    }
 
-    double lambda_u = 0.5;
+    double lambda_u = 0.6;
+    // 控制输入最小化 Cost，尽量避免主动使用踝关节力矩来维持平衡
     for (size_t i = 0; i < N * k; ++i) {
         J_alip += lambda_u * (U(0, i) * U(0, i) + U(1, i) * U(1, i));
     }
 
-    // 终点约束 Cost
+    // // 终点约束 Cost
+    // // [修正]: ALIP 的 X 是局部状态。全局位置 = P_final + X_final_local
+    // // 我们用最后一步的 P 和 X_goal 来计算全局位置
     double lambda_goal_yaw = 500.0;
-    
-    // [修正]: ALIP 的 X 是局部状态。全局位置 = P_final + X_final_local
-    // 我们用最后一步的 P 和 X_goal 来计算全局位置
     casadi::MX P_final_com = P_alip(casadi::Slice(), N - 1);
-    
     J_alip += lambda_goal_yaw * ((X_goal(0) + P_final_com(0) - x_com_goal(0)) * (X_goal(0) + P_final_com(0) - x_com_goal(0)) + (X_goal(1) + P_final_com(1) - x_com_goal(1)) * (X_goal(1) + P_final_com(1) - x_com_goal(1)));
 
     double lambda_terminal_state = 1000.0; // 权重很大，效果接近硬约束
     
     // 惩罚末端位置偏差 (防止摔倒)
-    J_alip += lambda_terminal_state * (casadi::MX::pow(X_goal(0), 2) + casadi::MX::pow(X_goal(1), 2));
+    // J_alip += lambda_terminal_state * (casadi::MX::pow(X_goal(0), 2) + casadi::MX::pow(X_goal(1), 2));
     
     // 惩罚末端动量 (刹车)
     J_alip += lambda_terminal_state * (casadi::MX::pow(X_goal(2), 2) + casadi::MX::pow(X_goal(3), 2));
 
     // 加一个代价，使加alip模型后的步态尽量跟随上层规划出来的落脚点
-    double lambda_foot_tracking = 50.0;
+    double lambda_foot_tracking = 40.0;
     for (size_t i = 0; i < N; ++i) {
         double ref_x = res_px[i]; // 使用数值
         double ref_y = res_py[i];
@@ -632,6 +641,18 @@ int main(int argc, char** argv)
     opti_alip.subject_to( dist_sq_feet_alip <= max_stance_width_alip * max_stance_width_alip );
 #endif
 
+    // casadi::MX P_final_com = P_alip(casadi::Slice(), N - 1);
+
+    // 定义容差半径 (例如 1cm)
+    // double final_pos_tolerance = 0.01; 
+
+    // // 计算与目标的偏差
+    // casadi::MX error_x = X_goal(0) + P_final_com(0) - x_com_goal(0);
+    // casadi::MX error_y = X_goal(1) + P_final_com(1) - x_com_goal(1);
+
+    // // 添加约束：偏差距离平方 <= 容差平方
+    // opti_alip.subject_to( error_x * error_x + error_y * error_y <= final_pos_tolerance * final_pos_tolerance );
+
     // 4. 相邻步转角约束
     double max_step_yaw_alip = M_PI / 12; // 稍微放宽
     for (size_t i = 0; i < N - 1; ++i)
@@ -641,7 +662,7 @@ int main(int argc, char** argv)
         opti_alip.subject_to(casadi::MX::abs(P_next(2) - P_current(2)) <= max_step_yaw_alip);
     }
 
-     // 5. 运动学约束 (您要求的方案：双圆约束)
+     // 5. 运动学约束 (双圆约束)
     for (size_t i = 1; i < N; ++i) // 此编号为摆动脚的编号
     {
         bool cuurent_left_support;
